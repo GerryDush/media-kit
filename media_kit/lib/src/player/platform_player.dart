@@ -16,6 +16,7 @@ import 'package:media_kit/src/models/player_log.dart';
 import 'package:media_kit/src/models/media/media.dart';
 import 'package:media_kit/src/models/audio_device.dart';
 import 'package:media_kit/src/models/audio_params.dart';
+import 'package:media_kit/src/models/audio_visualization_frame.dart';
 import 'package:media_kit/src/models/video_params.dart';
 import 'package:media_kit/src/models/player_state.dart';
 import 'package:media_kit/src/models/playlist_mode.dart';
@@ -84,6 +85,8 @@ abstract class PlatformPlayer {
     ),
     /* AUDIO-PARAMS STREAM SHOULD NOT BE DISTINCT */
     audioParamsController.stream,
+    /* AUDIO-VISUALIZATION STREAM SHOULD NOT BE DISTINCT */
+    audioVisualizationController.stream,
     /* VIDEO-PARAMS STREAM SHOULD NOT BE DISTINCT */
     videoParamsController.stream,
     audioBitrateController.stream.distinct(
@@ -135,6 +138,7 @@ abstract class PlatformPlayer {
         playlistModeController.close(),
         shuffleController.close(),
         audioParamsController.close(),
+        audioVisualizationController.close(),
         videoParamsController.close(),
         audioBitrateController.close(),
         audioDeviceController.close(),
@@ -364,6 +368,10 @@ abstract class PlatformPlayer {
       StreamController<AudioParams>.broadcast();
 
   @protected
+  final StreamController<AudioVisualizationFrame> audioVisualizationController =
+      StreamController<AudioVisualizationFrame>.broadcast();
+
+  @protected
   final StreamController<VideoParams> videoParamsController =
       StreamController<VideoParams>.broadcast();
 
@@ -427,6 +435,20 @@ abstract class PlatformPlayer {
 
   /// Publicly defined clean-up [Function]s which must be called before [dispose].
   final List<Future<void> Function()> release = [];
+}
+
+/// Output mode for native audio visualization.
+enum AudioVisualizationMode {
+  bands,
+  pcmWindow,
+  hybrid,
+  rawPcm,
+}
+
+/// Channel layout for native audio visualization PCM payloads.
+enum AudioVisualizationChannelMode {
+  mono,
+  stereo,
 }
 
 /// {@template player_configuration}
@@ -507,6 +529,63 @@ class PlayerConfiguration {
   /// Default: `32` MB or `32 * 1024 * 1024` bytes.
   final int bufferSize;
 
+  /// Enables real-time audio visualization frames on the native backend.
+  ///
+  /// Default: `false`.
+  final bool audioVisualization;
+
+  /// Number of history bars to emit in each visualization frame.
+  ///
+  /// Default: `48`.
+  final int audioVisualizationBars;
+
+  /// Number of frequency bands to emit when the native backend provides
+  /// spectral analysis data.
+  ///
+  /// Default: `16`.
+  final int audioVisualizationBands;
+
+  /// Update interval for audio visualization analysis on the native backend.
+  ///
+  /// Default: `50ms`.
+  final Duration audioVisualizationInterval;
+
+  /// Output mode used by the native audio visualization backend.
+  ///
+  /// Default: [AudioVisualizationMode.hybrid].
+  final AudioVisualizationMode audioVisualizationMode;
+
+  /// Channel mode used by the native audio visualization backend.
+  ///
+  /// Default: [AudioVisualizationChannelMode.mono].
+  final AudioVisualizationChannelMode audioVisualizationChannelMode;
+
+  /// Number of PCM frames per channel emitted for `pcm_window` or `hybrid`.
+  ///
+  /// Default: `256`.
+  final int audioVisualizationPcmWindowSize;
+
+  /// Analysis FFT/window size used for spectral extraction.
+  ///
+  /// Default: `1024`.
+  final int audioVisualizationFftSize;
+
+  /// Hop size in PCM frames used between emitted visualization frames.
+  ///
+  /// Default: `512`.
+  final int audioVisualizationHopSize;
+
+  /// Raw PCM chunk size used when [audioVisualizationMode] is
+  /// [AudioVisualizationMode.rawPcm].
+  ///
+  /// Default: `1024`.
+  final int audioVisualizationRawChunkSize;
+
+  /// Maximum visualization frame rate.
+  ///
+  /// Default: `60`.
+  final int audioVisualizationMaxFps;
+
   /// Sets the list of allowed protocols for native backend.
   ///
   /// Default: `['file', 'tcp', 'tls', 'http', 'https', 'crypto', 'data']`.
@@ -528,6 +607,17 @@ class PlayerConfiguration {
     this.libassAndroidFontName,
     this.logLevel = MPVLogLevel.error,
     this.bufferSize = 32 * 1024 * 1024,
+    this.audioVisualization = false,
+    this.audioVisualizationBars = 48,
+    this.audioVisualizationBands = 16,
+    this.audioVisualizationInterval = const Duration(milliseconds: 50),
+    this.audioVisualizationMode = AudioVisualizationMode.hybrid,
+    this.audioVisualizationChannelMode = AudioVisualizationChannelMode.mono,
+    this.audioVisualizationPcmWindowSize = 256,
+    this.audioVisualizationFftSize = 1024,
+    this.audioVisualizationHopSize = 512,
+    this.audioVisualizationRawChunkSize = 1024,
+    this.audioVisualizationMaxFps = 60,
     this.protocolWhitelist = const [
       'udp',
       'rtp',

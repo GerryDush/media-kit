@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
@@ -19,6 +20,7 @@ import 'package:media_kit/ffi/ffi.dart';
 
 import 'package:media_kit/src/models/audio_device.dart';
 import 'package:media_kit/src/models/audio_params.dart';
+import 'package:media_kit/src/models/audio_visualization_frame.dart';
 import 'package:media_kit/src/models/media/media.dart';
 import 'package:media_kit/src/models/playable.dart';
 import 'package:media_kit/src/models/player_log.dart';
@@ -38,6 +40,66 @@ import 'package:media_kit/src/player/native/utils/temp_file.dart';
 import 'package:media_kit/src/player/platform_player.dart';
 
 import 'package:media_kit/generated/libmpv/bindings.dart' as generated;
+
+typedef _MpvAudioVisualizationConfigureNative = Int32 Function(
+  Pointer<generated.mpv_handle>,
+  Int32,
+  Int32,
+  Int32,
+  Int32,
+  Int32,
+  Int32,
+  Int32,
+  Int32,
+);
+
+typedef _MpvAudioVisualizationConfigureDart = int Function(
+  Pointer<generated.mpv_handle>,
+  int,
+  int,
+  int,
+  int,
+  int,
+  int,
+  int,
+  int,
+);
+
+typedef _MpvAudioVisualizationReadNative = Int32 Function(
+  Pointer<generated.mpv_handle>,
+  Int32,
+  Int32,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Uint64>,
+  Pointer<Double>,
+  Pointer<Double>,
+  Pointer<Double>,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Double>,
+  Pointer<Double>,
+);
+
+typedef _MpvAudioVisualizationReadDart = int Function(
+  Pointer<generated.mpv_handle>,
+  int,
+  int,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Uint64>,
+  Pointer<Double>,
+  Pointer<Double>,
+  Pointer<Double>,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Int32>,
+  Pointer<Double>,
+  Pointer<Double>,
+);
 
 /// Initializes the native backend for package:media_kit.
 void nativeEnsureInitialized({String? libmpv}) {
@@ -292,6 +354,7 @@ class NativePlayer extends PlatformPlayer {
         if (!durationController.isClosed) {
           durationController.add(Duration.zero);
         }
+        _resetAudioVisualization();
         // if (!volumeController.isClosed) {
         //   volumeController.add(0.0);
         // }
@@ -825,9 +888,7 @@ class NativePlayer extends PlatformPlayer {
         // speed on the other hand, changes the pitch when audio-pitch-correction is set to FALSE.
         // Since, it also alters the actual [speed], the scaletempo:scale is divided by the same value of [pitch] to compensate the speed change.
         await _setPropertyFlag('audio-pitch-correction', false);
-        // Divide by [state.pitch] to compensate the speed change caused by pitch shift.
-        await _setPropertyString('af',
-            'scaletempo:scale=${(state.rate / state.pitch).toStringAsFixed(8)}');
+        await _applyAudioFilters();
       } else {
         // Pitch shift control is disabled.
 
@@ -876,9 +937,7 @@ class NativePlayer extends PlatformPlayer {
         // Since, it also alters the actual [speed], the scaletempo:scale is divided by the same value of [pitch] to compensate the speed change.
         await _setPropertyFlag('audio-pitch-correction', false);
         await _setPropertyDouble('speed', pitch);
-        // Divide by [state.pitch] to compensate the speed change caused by pitch shift.
-        await _setPropertyString('af',
-            'scaletempo:scale=${(state.rate / state.pitch).toStringAsFixed(8)}');
+        await _applyAudioFilters();
       } else {
         // Pitch shift control is disabled.
         throw ArgumentError('[PlayerConfiguration.pitch] is false');
@@ -1679,6 +1738,9 @@ class NativePlayer extends PlatformPlayer {
         if (!audioParamsController.isClosed) {
           audioParamsController.add(state.audioParams);
         }
+        if (configuration.audioVisualization) {
+          _applyAudioVisualizationConfiguration(reason: 'audio_params');
+        }
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'audio-bitrate' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_DOUBLE) {
@@ -1703,6 +1765,13 @@ class NativePlayer extends PlatformPlayer {
             state = state.copyWith(audioBitrate: null);
           }
         }
+      }
+      if (prop.ref.name.cast<Utf8>().toDartString() ==
+              _audioVisualizationProperty) {
+        if (!_audioVisualizationNativeConfigured) {
+          _applyAudioVisualizationConfiguration(reason: 'event_retry');
+        }
+        _readAndEmitAudioVisualizationFrame();
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'track-list' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_NODE) {
@@ -2417,7 +2486,7 @@ class NativePlayer extends PlatformPlayer {
       // Other properties based on [PlayerConfiguration].
       properties.addAll(
         {
-          if (!configuration.osc) ...{
+          if (!configuration.osc && configuration.vo != 'null') ...{
             'osc': 'no',
             'osd-level': '0',
           },
@@ -2454,8 +2523,22 @@ class NativePlayer extends PlatformPlayer {
         }
       }
 
+      if (configuration.audioVisualization) {
+        _resetAudioVisualization();
+        onLoadHooks.add(() async {
+          _audioVisualizationNativeConfigured = false;
+          _resetAudioVisualization();
+          await _applyAudioFilters(reason: 'on_load');
+        });
+        onUnloadHooks.add(() async {
+          _audioVisualizationNativeConfigured = false;
+          _resetAudioVisualization();
+        });
+        _applyAudioVisualizationConfiguration(reason: 'create');
+      }
+
       // Observe the properties to update the state & feed event stream.
-      <String, int>{
+      final propertiesToObserve = <String, int>{
         'pause': generated.mpv_format.MPV_FORMAT_FLAG,
         'time-pos': generated.mpv_format.MPV_FORMAT_DOUBLE,
         'duration': generated.mpv_format.MPV_FORMAT_DOUBLE,
@@ -2476,7 +2559,12 @@ class NativePlayer extends PlatformPlayer {
         'idle-active': generated.mpv_format.MPV_FORMAT_FLAG,
         'sub-text': generated.mpv_format.MPV_FORMAT_NODE,
         'secondary-sub-text': generated.mpv_format.MPV_FORMAT_NODE,
-      }.forEach(
+      };
+      if (configuration.audioVisualization) {
+        propertiesToObserve[_audioVisualizationProperty] =
+            generated.mpv_format.MPV_FORMAT_NONE;
+      }
+      propertiesToObserve.forEach(
         (property, format) {
           final reply = property.hashCode;
           final name = property.toNativeUtf8();
@@ -2502,8 +2590,14 @@ class NativePlayer extends PlatformPlayer {
       final level = levels[configuration.logLevel];
       if (level != null) {
         final min = level.toNativeUtf8();
-        mpv.mpv_request_log_messages(ctx, min.cast());
+        final result = mpv.mpv_request_log_messages(ctx, min.cast());
         calloc.free(min);
+        if (result < 0) {
+          _logError(
+            result,
+            'mpv_request_log_messages(level=$level)',
+          );
+        }
       }
 
       // Add libmpv hooks for supporting custom HTTP headers in [Media].
@@ -2636,6 +2730,381 @@ class NativePlayer extends PlatformPlayer {
     pointers.forEach(calloc.free);
   }
 
+  void _commandSync(List<String> args) {
+    final pointers = args.map<Pointer<Utf8>>((e) => e.toNativeUtf8()).toList();
+    final arr = calloc<Pointer<Utf8>>(128);
+    for (int i = 0; i < args.length; i++) {
+      (arr + i).value = pointers[i];
+    }
+    final result = mpv.mpv_command(ctx, arr.cast());
+    _logError(result, '_commandSync(${args.join(', ')})');
+    calloc.free(arr);
+    pointers.forEach(calloc.free);
+  }
+
+  Future<void> _applyAudioFilters({String reason = 'update'}) async {
+    final filterChain = _buildAudioFilterChain();
+    _emitInternalLog(
+      'debug',
+      filterChain == null
+          ? 'clearing audio filters ($reason)'
+          : 'applying audio filters ($reason): $filterChain',
+      prefix: 'audio_visualization',
+    );
+    if (filterChain == null || filterChain.isEmpty) {
+      _commandSync(['af', 'clr', '']);
+    } else {
+      _commandSync(['af', 'set', filterChain]);
+    }
+    final current = _getPropertyStringImmediate('af');
+    _emitInternalLog(
+      'debug',
+      current.isEmpty
+          ? 'af string readback unavailable or empty after apply ($reason)'
+          : 'af property after apply ($reason): $current',
+      prefix: 'audio_visualization',
+    );
+  }
+
+  String? _buildAudioFilterChain() {
+    final filters = <String>[];
+    if (configuration.pitch && (state.rate != 1.0 || state.pitch != 1.0)) {
+      filters.add(
+        'scaletempo:scale=${(state.rate / state.pitch).toStringAsFixed(8)}',
+      );
+    }
+    if (filters.isEmpty) {
+      return null;
+    }
+    return filters.join(',');
+  }
+
+  void _applyAudioVisualizationConfiguration({String reason = 'update'}) {
+    final sampleRate = state.audioParams.sampleRate;
+    final effectiveSampleRate =
+        sampleRate != null && sampleRate > 0 ? sampleRate : 44100;
+    final rateScale = effectiveSampleRate / 44100.0;
+    final effectivePcmWindowSize =
+        _scaleVisualizationFrames(_audioVisualizationPcmWindowSize, rateScale);
+    final effectiveFftSize =
+        _scaleVisualizationFrames(_audioVisualizationFftSize, rateScale);
+    final effectiveRawChunkSize =
+        _scaleVisualizationFrames(_audioVisualizationRawChunkSize, rateScale);
+    final effectiveHopSize = _scaleVisualizationFrames(
+      _audioVisualizationHopSize,
+      rateScale,
+      minValue: 1,
+      maxValue: effectiveFftSize,
+    );
+    final result = _configureAudioVisualizationNative(
+      ctx,
+      _nativeAudioVisualizationMode,
+      _nativeAudioVisualizationChannelMode,
+      _audioVisualizationBandCount,
+      effectivePcmWindowSize,
+      effectiveFftSize,
+      effectiveHopSize,
+      effectiveRawChunkSize,
+      _audioVisualizationMaxFps,
+    );
+
+    if (result >= 0) {
+      _audioVisualizationNativeConfigured = true;
+      _emitInternalLog(
+        'debug',
+        'configured audio visualization ($reason): '
+        'mode=$_configuredAudioVisualizationMode '
+        'channel=$_configuredAudioVisualizationChannelMode '
+        'sampleRate=$effectiveSampleRate '
+        'bands=$_audioVisualizationBandCount '
+        'pcmWindow=$effectivePcmWindowSize '
+        'fft=$effectiveFftSize '
+        'hop=$effectiveHopSize '
+        'raw=$effectiveRawChunkSize '
+        'maxFps=$_audioVisualizationMaxFps',
+        prefix: 'audio_visualization',
+      );
+      return;
+    }
+
+    _audioVisualizationNativeConfigured = false;
+    if (result != generated.mpv_error.MPV_ERROR_PROPERTY_UNAVAILABLE) {
+      _emitInternalLog(
+        'warn',
+        'failed to configure audio visualization ($reason): error=$result',
+        prefix: 'audio_visualization',
+      );
+    }
+  }
+
+  void _readAndEmitAudioVisualizationFrame() {
+    final version = calloc<Int32>();
+    final mode = calloc<Int32>();
+    final channelMode = calloc<Int32>();
+    final sequence = calloc<Uint64>();
+    final ptsSeconds = calloc<Double>();
+    final peak = calloc<Double>();
+    final rms = calloc<Double>();
+    final sampleRate = calloc<Int32>();
+    final channels = calloc<Int32>();
+    final framesPerChannel = calloc<Int32>();
+    final maxBands = _audioVisualizationReadBandCapacity;
+    final bands = calloc<Double>(maxBands);
+    final maxPcmValues = _audioVisualizationReadPcmCapacity;
+    final pcm = calloc<Double>(maxPcmValues);
+
+    try {
+      final bandCount = _readAudioVisualizationNative(
+        ctx,
+        maxBands,
+        maxPcmValues,
+        version,
+        mode,
+        channelMode,
+        sequence,
+        ptsSeconds,
+        peak,
+        rms,
+        sampleRate,
+        channels,
+        framesPerChannel,
+        bands,
+        pcm,
+      );
+      if (bandCount < 0) {
+        return;
+      }
+
+      final seq = sequence.value;
+      if (_lastAudioVisualizationSequence == seq) {
+        return;
+      }
+      _lastAudioVisualizationSequence = seq;
+
+      final resolvedChannels = math.max(1, channels.value);
+      final resolvedFrames =
+          framesPerChannel.value.clamp(0, _audioVisualizationMaxPcmFrames);
+      final pcmLength =
+          math.min(maxPcmValues, resolvedChannels * resolvedFrames).toInt();
+      final bandValues = List<double>.generate(
+        bandCount,
+        (index) => bands[index].clamp(0.0, 1.0),
+        growable: false,
+      );
+      final pcmValues = List<double>.generate(
+        pcmLength,
+        (index) => pcm[index].clamp(-1.0, 1.0),
+        growable: false,
+      );
+
+      _emitAudioVisualizationFrame(
+        version: version.value == 0 ? 1 : version.value,
+        mode: _nativeModeName(mode.value),
+        channelMode: _nativeChannelModeName(channelMode.value),
+        sequence: seq,
+        ptsSeconds: ptsSeconds.value.isFinite ? ptsSeconds.value : null,
+        sampleRate: sampleRate.value > 0 ? sampleRate.value : null,
+        channels: resolvedChannels,
+        framesPerChannel: resolvedFrames == 0 ? null : resolvedFrames,
+        peak: peak.value,
+        rms: rms.value,
+        bands: bandValues.isEmpty
+            ? const <double>[]
+            : _remapAudioVisualizationBands(bandValues),
+        pcm: pcmValues,
+      );
+    } finally {
+      calloc.free(version);
+      calloc.free(mode);
+      calloc.free(channelMode);
+      calloc.free(sequence);
+      calloc.free(ptsSeconds);
+      calloc.free(peak);
+      calloc.free(rms);
+      calloc.free(sampleRate);
+      calloc.free(channels);
+      calloc.free(framesPerChannel);
+      calloc.free(bands);
+      calloc.free(pcm);
+    }
+  }
+
+  List<double> _remapAudioVisualizationBands(List<double> source) {
+    if (source.isEmpty) {
+      return List<double>.filled(_audioVisualizationBandCount, 0.0);
+    }
+    if (source.length == _audioVisualizationBandCount) {
+      return List<double>.from(source, growable: false);
+    }
+    final result = List<double>.filled(_audioVisualizationBandCount, 0.0);
+    for (int i = 0; i < _audioVisualizationBandCount; i++) {
+      final start = i * source.length / _audioVisualizationBandCount;
+      final end = (i + 1) * source.length / _audioVisualizationBandCount;
+      final from = start.floor().clamp(0, source.length - 1);
+      final to = math.max(from, end.ceil() - 1).clamp(0, source.length - 1);
+      var value = 0.0;
+      for (int j = from; j <= to; j++) {
+        value = math.max(value, source[j]);
+      }
+      result[i] = value.clamp(0.0, 1.0);
+    }
+    return result;
+  }
+
+  double _shapeAudioVisualizationSample({
+    required double peak,
+    required double rms,
+  }) {
+    final transientBoost = math.max(0.0, peak - rms) * 1.45;
+    final mixed = ((peak * 0.88) + (rms * 0.12) + transientBoost)
+        .clamp(0.0, 1.0);
+    final gated = mixed < 0.004 ? 0.0 : (mixed - 0.004) / 0.996;
+    final curved =
+        (math.pow(gated.clamp(0.0, 1.0), 0.56).toDouble() * 1.18).clamp(0.0, 1.0);
+    final smoothing = curved >= _audioVisualizationEnvelope ? 0.94 : 0.46;
+    _audioVisualizationEnvelope +=
+        (curved - _audioVisualizationEnvelope) * smoothing;
+    if (_audioVisualizationEnvelope < 0.003) {
+      _audioVisualizationEnvelope = 0.0;
+    }
+    return _audioVisualizationEnvelope.clamp(0.0, 1.0);
+  }
+
+  void _emitAudioVisualizationFrame({
+    int version = 1,
+    String mode = 'bands',
+    String channelMode = 'mono',
+    int sequence = 0,
+    double? ptsSeconds,
+    int? sampleRate,
+    int? channels,
+    int? framesPerChannel,
+    double? peak,
+    double? rms,
+    List<double>? bands,
+    List<double>? pcm,
+  }) {
+    final normalized = _shapeAudioVisualizationSample(
+      peak: (peak ?? 0.0).clamp(0.0, 1.0),
+      rms: (rms ?? peak ?? 0.0).clamp(0.0, 1.0),
+    );
+    _audioVisualizationHistory.add(normalized);
+    while (_audioVisualizationHistory.length > _audioVisualizationBars) {
+      _audioVisualizationHistory.removeFirst();
+    }
+    if (!audioVisualizationController.isClosed) {
+      audioVisualizationController.add(
+        AudioVisualizationFrame(
+          version: version,
+          mode: mode,
+          channelMode: channelMode,
+          sequence: sequence,
+          position: state.position,
+          pts: ptsSeconds != null
+              ? Duration(
+                  microseconds: (ptsSeconds * Duration.microsecondsPerSecond)
+                      .round(),
+                )
+              : null,
+          sampleRate: sampleRate,
+          channels: channels,
+          framesPerChannel: framesPerChannel,
+          peaks: _audioVisualizationHistory.toList(growable: false),
+          bands: bands ?? const <double>[],
+          rms: rms,
+          pcm: pcm ?? const <double>[],
+        ),
+      );
+    }
+  }
+
+  void _resetAudioVisualization() {
+    _audioVisualizationEnvelope = 0.0;
+    _lastAudioVisualizationSequence = -1;
+    _audioVisualizationHistory
+      ..clear()
+      ..addAll(List<double>.filled(_audioVisualizationBars, 0.0));
+    if (!audioVisualizationController.isClosed) {
+      audioVisualizationController.add(
+        AudioVisualizationFrame(
+          mode: _configuredAudioVisualizationMode,
+          channelMode: _configuredAudioVisualizationChannelMode,
+          position: Duration.zero,
+          peaks: _audioVisualizationHistory.toList(growable: false),
+          bands: _configuredAudioVisualizationMode == 'bands' ||
+                  _configuredAudioVisualizationMode == 'hybrid'
+              ? List<double>.filled(_audioVisualizationBandCount, 0.0)
+              : const <double>[],
+          rms: 0.0,
+          pcm: const <double>[],
+        ),
+      );
+    }
+  }
+
+  String _nativeModeName(int value) {
+    switch (value) {
+      case _nativeVisualizationModeBands:
+        return 'bands';
+      case _nativeVisualizationModePcmWindow:
+        return 'pcm_window';
+      case _nativeVisualizationModeHybrid:
+        return 'hybrid';
+      case _nativeVisualizationModeRawPcm:
+        return 'raw_pcm';
+      default:
+        return 'hybrid';
+    }
+  }
+
+  String _nativeChannelModeName(int value) {
+    switch (value) {
+      case _nativeVisualizationChannelStereo:
+        return 'stereo';
+      case _nativeVisualizationChannelMono:
+      default:
+        return 'mono';
+    }
+  }
+
+  int _scaleVisualizationFrames(
+    int base,
+    double rateScale, {
+    int minValue = 32,
+    int maxValue = 4096,
+  }) {
+    final scaled = (base * rateScale).round();
+    return scaled.clamp(minValue, maxValue);
+  }
+
+  void _emitInternalLog(
+    String level,
+    String text, {
+    String prefix = 'media_kit',
+  }) {
+    if (!logController.isClosed) {
+      logController.add(
+        PlayerLog(
+          prefix: prefix,
+          level: level,
+          text: text,
+        ),
+      );
+    }
+  }
+
+  String _getPropertyStringImmediate(String property) {
+    final name = property.toNativeUtf8();
+    final value = mpv.mpv_get_property_string(ctx, name.cast());
+    calloc.free(name);
+    if (value == nullptr) {
+      return '';
+    }
+    final result = value.cast<Utf8>().toDartString();
+    mpv.mpv_free(value.cast());
+    return result;
+  }
+
   String _sanitizeUri(String uri) {
     // Append \\?\ prefix on Windows to support long file paths.
     final parser = URIParser(uri);
@@ -2653,6 +3122,19 @@ class NativePlayer extends PlatformPlayer {
 
   /// Generated libmpv C API bindings.
   final generated.MPV mpv;
+
+  late final _MpvAudioVisualizationConfigureDart
+      _configureAudioVisualizationNative =
+      DynamicLibrary.open(NativeLibrary.path).lookupFunction<
+        _MpvAudioVisualizationConfigureNative,
+        _MpvAudioVisualizationConfigureDart
+      >('mpv_audio_visualization_configure');
+
+  late final _MpvAudioVisualizationReadDart _readAudioVisualizationNative =
+      DynamicLibrary.open(NativeLibrary.path).lookupFunction<
+        _MpvAudioVisualizationReadNative,
+        _MpvAudioVisualizationReadDart
+      >('mpv_audio_visualization_read');
 
   /// [Pointer] to [generated.mpv_handle] of this instance.
   Pointer<generated.mpv_handle> ctx = nullptr;
@@ -2689,6 +3171,68 @@ class NativePlayer extends PlatformPlayer {
   /// This is used to prevent a duplicate update by the `playlist-playing-pos` event.
   bool isPlaylistStateChangeAllowed = true;
 
+  static const String _audioVisualizationProperty = 'audio-visualization';
+  static const int _nativeVisualizationModeBands = 0;
+  static const int _nativeVisualizationModePcmWindow = 1;
+  static const int _nativeVisualizationModeHybrid = 2;
+  static const int _nativeVisualizationModeRawPcm = 3;
+  static const int _nativeVisualizationChannelMono = 0;
+  static const int _nativeVisualizationChannelStereo = 1;
+  static const int _audioVisualizationNativeMaxBands = 64;
+  static const int _audioVisualizationMaxPcmFrames = 4096;
+
+  late final int _audioVisualizationBars =
+      configuration.audioVisualizationBars.clamp(8, 256).toInt();
+  late final int _audioVisualizationBandCount =
+      configuration.audioVisualizationBands.clamp(4, 64).toInt();
+  late final int _audioVisualizationPcmWindowSize =
+      configuration.audioVisualizationPcmWindowSize.clamp(32, 4096).toInt();
+  late final int _audioVisualizationFftSize =
+      configuration.audioVisualizationFftSize.clamp(64, 4096).toInt();
+  late final int _audioVisualizationHopSize = configuration
+      .audioVisualizationHopSize
+      .clamp(1, _audioVisualizationFftSize)
+      .toInt();
+  late final int _audioVisualizationRawChunkSize =
+      configuration.audioVisualizationRawChunkSize.clamp(32, 4096).toInt();
+  late final int _audioVisualizationMaxFps =
+      configuration.audioVisualizationMaxFps.clamp(0, 240).toInt();
+  late final int _nativeAudioVisualizationMode = () {
+    switch (configuration.audioVisualizationMode) {
+      case AudioVisualizationMode.bands:
+        return _nativeVisualizationModeBands;
+      case AudioVisualizationMode.pcmWindow:
+        return _nativeVisualizationModePcmWindow;
+      case AudioVisualizationMode.hybrid:
+        return _nativeVisualizationModeHybrid;
+      case AudioVisualizationMode.rawPcm:
+        return _nativeVisualizationModeRawPcm;
+    }
+  }();
+  late final int _nativeAudioVisualizationChannelMode = () {
+    switch (configuration.audioVisualizationChannelMode) {
+      case AudioVisualizationChannelMode.mono:
+        return _nativeVisualizationChannelMono;
+      case AudioVisualizationChannelMode.stereo:
+        return _nativeVisualizationChannelStereo;
+    }
+  }();
+  late final String _configuredAudioVisualizationMode =
+      _nativeModeName(_nativeAudioVisualizationMode);
+  late final String _configuredAudioVisualizationChannelMode =
+      _nativeChannelModeName(_nativeAudioVisualizationChannelMode);
+  late final int _audioVisualizationReadBandCapacity =
+      math.max(_audioVisualizationBandCount, _audioVisualizationNativeMaxBands);
+  late final int _audioVisualizationReadPcmCapacity =
+      math.max(_audioVisualizationPcmWindowSize, _audioVisualizationRawChunkSize) *
+      (_nativeAudioVisualizationChannelMode == _nativeVisualizationChannelStereo
+          ? 2
+          : 1);
+
+  final ListQueue<double> _audioVisualizationHistory = ListQueue<double>();
+  double _audioVisualizationEnvelope = 0.0;
+  int _lastAudioVisualizationSequence = -1;
+  bool _audioVisualizationNativeConfigured = false;
   /// Current loaded [Media] queue.
   List<Media> current = <Media>[];
 

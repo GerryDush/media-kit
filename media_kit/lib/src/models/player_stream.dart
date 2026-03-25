@@ -9,6 +9,7 @@ import 'package:media_kit/src/models/playlist.dart';
 import 'package:media_kit/src/models/player_log.dart';
 import 'package:media_kit/src/models/audio_device.dart';
 import 'package:media_kit/src/models/audio_params.dart';
+import 'package:media_kit/src/models/audio_visualization_frame.dart';
 import 'package:media_kit/src/models/playlist_mode.dart';
 import 'package:media_kit/src/models/video_params.dart';
 
@@ -65,6 +66,9 @@ class PlayerStream {
   /// e.g. sample rate, channels, etc.
   final Stream<AudioParams> audioParams;
 
+  /// Real-time audio visualization frames emitted by the player backend.
+  final Stream<AudioVisualizationFrame> audioVisualization;
+
   /// Video parameters of the currently playing [Media].
   /// e.g. width, height, rotation etc.
   final Stream<VideoParams> videoParams;
@@ -115,6 +119,7 @@ class PlayerStream {
     this.playlistMode,
     this.shuffle,
     this.audioParams,
+    this.audioVisualization,
     this.videoParams,
     this.audioBitrate,
     this.audioDevice,

@@ -10,6 +10,7 @@ export 'package:media_kit/src/media_kit.dart';
 
 export 'package:media_kit/src/models/audio_device.dart';
 export 'package:media_kit/src/models/audio_params.dart';
+export 'package:media_kit/src/models/audio_visualization_frame.dart';
 export 'package:media_kit/src/models/media/media.dart';
 export 'package:media_kit/src/models/playable.dart';
 export 'package:media_kit/src/models/player_log.dart';
