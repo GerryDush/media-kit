@@ -9,8 +9,28 @@ environment:
   flutter: ">=3.7.0"
 
 dependencies:
-  media_kit_libs_android_audio: ^1.3.9
-  media_kit_libs_ios_audio: ^1.1.4
-  media_kit_libs_macos_audio: ^1.1.5
-  media_kit_libs_windows_audio: ^1.0.10
-  media_kit_libs_linux: ^1.2.1
+  media_kit_libs_android_audio:
+    git:
+      url: https://github.com/GerryDush/media-kit.git
+      ref: v1.2.5
+      path: libs/android/media_kit_libs_android_audio
+  media_kit_libs_ios_audio:
+    git:
+      url: https://github.com/GerryDush/media-kit.git
+      ref: v1.2.5
+      path: libs/ios/media_kit_libs_ios_audio
+  media_kit_libs_macos_audio:
+    git:
+      url: https://github.com/GerryDush/media-kit.git
+      ref: v1.2.5
+      path: libs/macos/media_kit_libs_macos_audio
+  media_kit_libs_windows_audio:
+    git:
+      url: https://github.com/GerryDush/media-kit.git
+      ref: v1.2.5
+      path: libs/windows/media_kit_libs_windows_audio
+  media_kit_libs_linux:
+    git:
+      url: https://github.com/GerryDush/media-kit.git
+      ref: v1.2.5
+      path: libs/linux/media_kit_libs_linux
